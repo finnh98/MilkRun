@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+.idea/
+maps_api_key.json
+*.pyc

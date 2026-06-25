@@ -33,19 +33,22 @@ def halt(message):
 
 
 def load_api_key():
-    if not API_KEY_FILE.exists():
-        halt(f"Missing {API_KEY_FILE}. Put it in the same folder as app.py.")
+    api_key = st.secrets.get("maps_api_key")
 
-    try:
-        with open(API_KEY_FILE, "r") as f:
-            config = json.load(f)
-    except json.JSONDecodeError as e:
-        halt(f"{API_KEY_FILE} is not valid JSON: {e}")
+    if not api_key and API_KEY_FILE.exists():
+        try:
+            with open(API_KEY_FILE, "r") as f:
+                config = json.load(f)
+        except json.JSONDecodeError as e:
+            halt(f"{API_KEY_FILE} is not valid JSON: {e}")
 
-    api_key = config.get("maps_api_key")
+        api_key = config.get("maps_api_key")
 
     if not api_key or api_key == "YOUR_API_KEY_HERE":
-        halt("Add your real Google Maps API key to maps_api_key.json.")
+        halt(
+            "Add your Google Maps API key to Streamlit secrets as "
+            "maps_api_key, or put it in maps_api_key.json locally."
+        )
 
     return api_key
 
