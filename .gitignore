@@ -2,4 +2,6 @@
 __pycache__/
 .idea/
 maps_api_key.json
+supabase_detail.json
+.streamlit/secrets.toml
 *.pyc
