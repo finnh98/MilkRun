@@ -1,20 +1,18 @@
 import base64
 import json
-import sqlite3
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlencode
 
 import streamlit as st
 import requests
+from supabase import create_client
 from streamlit.errors import StreamlitSecretNotFoundError
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_FILE = BASE_DIR / "farmers.db"
-DRIVERS_DB_FILE = BASE_DIR / "drivers.db"
-ROUTES_DB_FILE = BASE_DIR / "routes.db"
 API_KEY_FILE = BASE_DIR / "maps_api_key.json"
+SUPABASE_FILE = BASE_DIR / "supabase_detail.json"
 LOGO_FILE = BASE_DIR / "milkrun_logo.png"
 
 DEPOT = {
@@ -77,301 +75,177 @@ def load_api_key():
     return api_key
 
 
-def init_db():
+def load_supabase_config():
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS farmers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    farmer_name TEXT NOT NULL,
-                    phone TEXT,
-                    lat REAL NOT NULL,
-                    lng REAL NOT NULL
-                )
-                """
-            )
-            columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(farmers)").fetchall()
-            }
-            if "phone" not in columns:
-                conn.execute("ALTER TABLE farmers ADD COLUMN phone TEXT")
+        supabase_url = st.secrets.get("supabase_url") or st.secrets.get("project_url")
+        supabase_key = st.secrets.get("supabase_key")
+    except StreamlitSecretNotFoundError:
+        supabase_url = None
+        supabase_key = None
 
-            for farmer_name, phone in DEFAULT_FARMER_PHONES.items():
-                conn.execute(
-                    """
-                    UPDATE farmers
-                    SET phone = ?
-                    WHERE farmer_name = ?
-                      AND (phone IS NULL OR phone = '')
-                    """,
-                    (phone, farmer_name),
-                )
-    except sqlite3.Error as e:
-        halt(f"Could not initialize {DB_FILE.name}: {e}")
+    if (not supabase_url or not supabase_key) and SUPABASE_FILE.exists():
+        try:
+            with open(SUPABASE_FILE, "r") as f:
+                config = json.load(f)
+        except json.JSONDecodeError as e:
+            halt(f"{SUPABASE_FILE} is not valid JSON: {e}")
+
+        supabase_url = supabase_url or config.get("supabase_url") or config.get("project_url")
+        supabase_key = supabase_key or config.get("supabase_key")
+
+    if not supabase_url or not supabase_key:
+        halt(
+            "Add Supabase credentials to Streamlit secrets as supabase_url and "
+            "supabase_key, or put them in supabase_detail.json locally."
+        )
+
+    return supabase_url, supabase_key
+
+
+@st.cache_resource
+def get_supabase_client():
+    supabase_url, supabase_key = load_supabase_config()
+    return create_client(supabase_url, supabase_key)
+
+
+def supabase_error(message, error):
+    halt(f"{message}: {error}")
 
 
 def load_farmers():
-    init_db()
-
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT farmer_name, phone, lat, lng FROM farmers ORDER BY farmer_name"
-            ).fetchall()
-    except sqlite3.Error as e:
-        halt(f"Could not read {DB_FILE.name}: {e}")
+        response = (
+            get_supabase_client()
+            .table("farmers")
+            .select("farmer_name, phone, lat, lng")
+            .order("farmer_name")
+            .execute()
+        )
+    except Exception as e:
+        supabase_error("Could not read farmers from Supabase", e)
 
-    return [dict(row) for row in rows]
+    return response.data or []
 
 
 def add_farmer(name, phone, lat, lng):
-    init_db()
-
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute(
-                "INSERT INTO farmers (farmer_name, phone, lat, lng) VALUES (?, ?, ?, ?)",
-                (name, phone, lat, lng),
-            )
-    except sqlite3.Error as e:
-        halt(f"Could not add farmer to {DB_FILE.name}: {e}")
-
-
-def init_drivers_db():
-    try:
-        with sqlite3.connect(DRIVERS_DB_FILE) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS drivers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    phone TEXT NOT NULL
-                )
-                """
-            )
-            default_names = [name for name, _ in DEFAULT_DRIVERS]
-            conn.execute(
-                f"DELETE FROM drivers WHERE name NOT IN ({','.join('?' for _ in default_names)})",
-                default_names,
-            )
-            for name, phone in DEFAULT_DRIVERS:
-                conn.execute(
-                    """
-                    INSERT INTO drivers (name, phone)
-                    VALUES (?, ?)
-                    ON CONFLICT(name) DO UPDATE SET phone = excluded.phone
-                    """,
-                    (name, phone),
-                )
-    except sqlite3.Error as e:
-        halt(f"Could not initialize {DRIVERS_DB_FILE.name}: {e}")
+        get_supabase_client().table("farmers").insert(
+            {
+                "farmer_name": name,
+                "phone": phone,
+                "lat": float(lat),
+                "lng": float(lng),
+            }
+        ).execute()
+    except Exception as e:
+        supabase_error("Could not add farmer to Supabase", e)
 
 
 def load_drivers():
-    init_drivers_db()
-
     try:
-        with sqlite3.connect(DRIVERS_DB_FILE) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT name, phone FROM drivers ORDER BY name"
-            ).fetchall()
-    except sqlite3.Error as e:
-        halt(f"Could not read {DRIVERS_DB_FILE.name}: {e}")
-
-    return [dict(row) for row in rows]
-
-
-def init_routes_db():
-    try:
-        with sqlite3.connect(ROUTES_DB_FILE) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS assigned_routes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    route_title TEXT,
-                    route_date TEXT NOT NULL,
-                    driver_name TEXT NOT NULL,
-                    driver_phone TEXT NOT NULL,
-                    start_name TEXT NOT NULL,
-                    end_name TEXT NOT NULL,
-                    farmer_names_json TEXT NOT NULL,
-                    google_maps_url TEXT NOT NULL,
-                    distance_km REAL NOT NULL,
-                    duration TEXT NOT NULL,
-                    completed INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(assigned_routes)").fetchall()
-            }
-            if "route_title" not in columns:
-                conn.execute("ALTER TABLE assigned_routes ADD COLUMN route_title TEXT")
-            if "completed" not in columns:
-                conn.execute(
-                    "ALTER TABLE assigned_routes ADD COLUMN completed INTEGER NOT NULL DEFAULT 0"
-                )
-            backfill_route_titles(conn)
-    except sqlite3.Error as e:
-        halt(f"Could not initialize {ROUTES_DB_FILE.name}: {e}")
-
-
-def backfill_route_titles(conn):
-    rows = conn.execute(
-        """
-        SELECT id, route_date
-        FROM assigned_routes
-        WHERE route_title IS NULL OR route_title = ''
-        ORDER BY route_date, id
-        """
-    ).fetchall()
-    route_counts = {}
-
-    for route_id, route_date in rows:
-        if route_date not in route_counts:
-            route_counts[route_date] = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM assigned_routes
-                WHERE route_date = ?
-                  AND route_title IS NOT NULL
-                  AND route_title != ''
-                """,
-                (route_date,),
-            ).fetchone()[0]
-
-        route_counts[route_date] += 1
-        conn.execute(
-            "UPDATE assigned_routes SET route_title = ? WHERE id = ?",
-            (f"Route {route_counts[route_date]}", route_id),
+        response = (
+            get_supabase_client()
+            .table("drivers")
+            .select("name, phone")
+            .order("name")
+            .execute()
         )
+    except Exception as e:
+        supabase_error("Could not read drivers from Supabase", e)
+
+    return response.data or []
 
 
-def next_route_title(conn, route_date):
-    route_count = conn.execute(
-        "SELECT COUNT(*) FROM assigned_routes WHERE route_date = ?",
-        (route_date.isoformat(),),
-    ).fetchone()[0]
-    return f"Route {route_count + 1}"
+def next_route_title(route_date):
+    try:
+        response = (
+            get_supabase_client()
+            .table("assigned_routes")
+            .select("id")
+            .eq("route_date", route_date.isoformat())
+            .execute()
+        )
+    except Exception as e:
+        supabase_error("Could not count assigned routes in Supabase", e)
+
+    return f"Route {len(response.data or []) + 1}"
 
 
 def save_route_assignment(route_date, driver, stops, distance_km, duration, maps_url):
-    init_routes_db()
     farmer_names = [stop["name"] for stop in stops]
+    route_title = next_route_title(route_date)
 
     try:
-        with sqlite3.connect(ROUTES_DB_FILE) as conn:
-            route_title = next_route_title(conn, route_date)
-            conn.execute(
-                """
-                INSERT INTO assigned_routes (
-                    route_title,
-                    route_date,
-                    driver_name,
-                    driver_phone,
-                    start_name,
-                    end_name,
-                    farmer_names_json,
-                    google_maps_url,
-                    distance_km,
-                    duration
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    route_title,
-                    route_date.isoformat(),
-                    driver["name"],
-                    driver["phone"],
-                    DEPOT["name"],
-                    DESTINATION["name"],
-                    json.dumps(farmer_names),
-                    maps_url,
-                    distance_km,
-                    duration,
-                ),
-            )
-            return route_title
-    except sqlite3.Error as e:
-        halt(f"Could not save route assignment: {e}")
+        get_supabase_client().table("assigned_routes").insert(
+            {
+                "route_title": route_title,
+                "route_date": route_date.isoformat(),
+                "driver_name": driver["name"],
+                "driver_phone": driver["phone"],
+                "start_name": DEPOT["name"],
+                "end_name": DESTINATION["name"],
+                "farmer_names_json": json.dumps(farmer_names),
+                "google_maps_url": maps_url,
+                "distance_km": float(distance_km),
+                "duration": duration,
+                "completed": False,
+            }
+        ).execute()
+    except Exception as e:
+        supabase_error("Could not save route assignment to Supabase", e)
+
+    return route_title
 
 
 def load_driver_routes(driver_name, route_date):
-    init_routes_db()
-
     try:
-        with sqlite3.connect(ROUTES_DB_FILE) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM assigned_routes
-                WHERE driver_name = ? AND route_date = ?
-                ORDER BY completed ASC, id ASC
-                """,
-                (driver_name, route_date.isoformat()),
-            ).fetchall()
-    except sqlite3.Error as e:
-        halt(f"Could not read assigned routes: {e}")
+        response = (
+            get_supabase_client()
+            .table("assigned_routes")
+            .select("*")
+            .eq("driver_name", driver_name)
+            .eq("route_date", route_date.isoformat())
+            .order("completed")
+            .order("id")
+            .execute()
+        )
+    except Exception as e:
+        supabase_error("Could not read driver routes from Supabase", e)
 
-    return [dict(row) for row in rows]
+    return response.data or []
 
 
 def load_assigned_routes(route_date, driver_name=None):
-    init_routes_db()
-    params = [route_date.isoformat()]
-    driver_filter = ""
-
-    if driver_name:
-        driver_filter = "AND driver_name = ?"
-        params.append(driver_name)
-
     try:
-        with sqlite3.connect(ROUTES_DB_FILE) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                f"""
-                SELECT *
-                FROM assigned_routes
-                WHERE route_date = ?
-                {driver_filter}
-                ORDER BY completed ASC, id ASC
-                """,
-                params,
-            ).fetchall()
-    except sqlite3.Error as e:
-        halt(f"Could not read assigned routes: {e}")
+        query = (
+            get_supabase_client()
+            .table("assigned_routes")
+            .select("*")
+            .eq("route_date", route_date.isoformat())
+        )
+        if driver_name:
+            query = query.eq("driver_name", driver_name)
+        response = query.order("completed").order("id").execute()
+    except Exception as e:
+        supabase_error("Could not read assigned routes from Supabase", e)
 
-    return [dict(row) for row in rows]
+    return response.data or []
 
 
 def delete_route(route_id):
-    init_routes_db()
-
     try:
-        with sqlite3.connect(ROUTES_DB_FILE) as conn:
-            conn.execute("DELETE FROM assigned_routes WHERE id = ?", (route_id,))
-    except sqlite3.Error as e:
-        halt(f"Could not delete route: {e}")
+        get_supabase_client().table("assigned_routes").delete().eq("id", route_id).execute()
+    except Exception as e:
+        supabase_error("Could not delete route from Supabase", e)
 
 
 def update_route_completed(route_id, completed):
-    init_routes_db()
-
     try:
-        with sqlite3.connect(ROUTES_DB_FILE) as conn:
-            conn.execute(
-                "UPDATE assigned_routes SET completed = ? WHERE id = ?",
-                (1 if completed else 0, route_id),
-            )
-    except sqlite3.Error as e:
-        halt(f"Could not update route status: {e}")
+        get_supabase_client().table("assigned_routes").update(
+            {"completed": bool(completed)}
+        ).eq("id", route_id).execute()
+    except Exception as e:
+        supabase_error("Could not update route status in Supabase", e)
 
 
 def stop_payload(stop):
