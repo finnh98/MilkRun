@@ -35,6 +35,17 @@ DEFAULT_DRIVERS = [
     ("Paul", "+353 86 234 5678"),
 ]
 
+DEFAULT_FARMER_PHONES = {
+    "Andrew Egan": "+353 87 410 1123",
+    "Ballyneety Farmer A": "+353 86 420 3344",
+    "Caherline Farmer A": "+353 85 430 5566",
+    "Hospital Farmer A": "+353 87 440 7788",
+    "Hospital Farmer B": "+353 86 450 9900",
+    "John Hourigan": "+353 85 460 1212",
+    "Kilteely Farmer A": "+353 87 470 3434",
+    "Paul Keane": "+353 86 480 5656",
+}
+
 
 def halt(message):
     st.error(message)
@@ -74,11 +85,29 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS farmers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     farmer_name TEXT NOT NULL,
+                    phone TEXT,
                     lat REAL NOT NULL,
                     lng REAL NOT NULL
                 )
                 """
             )
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(farmers)").fetchall()
+            }
+            if "phone" not in columns:
+                conn.execute("ALTER TABLE farmers ADD COLUMN phone TEXT")
+
+            for farmer_name, phone in DEFAULT_FARMER_PHONES.items():
+                conn.execute(
+                    """
+                    UPDATE farmers
+                    SET phone = ?
+                    WHERE farmer_name = ?
+                      AND (phone IS NULL OR phone = '')
+                    """,
+                    (phone, farmer_name),
+                )
     except sqlite3.Error as e:
         halt(f"Could not initialize {DB_FILE.name}: {e}")
 
@@ -90,7 +119,7 @@ def load_farmers():
         with sqlite3.connect(DB_FILE) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT farmer_name, lat, lng FROM farmers ORDER BY farmer_name"
+                "SELECT farmer_name, phone, lat, lng FROM farmers ORDER BY farmer_name"
             ).fetchall()
     except sqlite3.Error as e:
         halt(f"Could not read {DB_FILE.name}: {e}")
@@ -98,14 +127,14 @@ def load_farmers():
     return [dict(row) for row in rows]
 
 
-def add_farmer(name, lat, lng):
+def add_farmer(name, phone, lat, lng):
     init_db()
 
     try:
         with sqlite3.connect(DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO farmers (farmer_name, lat, lng) VALUES (?, ?, ?)",
-                (name, lat, lng),
+                "INSERT INTO farmers (farmer_name, phone, lat, lng) VALUES (?, ?, ?, ?)",
+                (name, phone, lat, lng),
             )
     except sqlite3.Error as e:
         halt(f"Could not add farmer to {DB_FILE.name}: {e}")
@@ -468,20 +497,20 @@ def apply_styles():
         """
         <style>
             :root {
-                --milk-ink: #17211b;
-                --milk-muted: #647067;
-                --milk-line: #dbe5dc;
-                --milk-panel: #f7faf6;
-                --milk-accent: #1f7a4d;
-                --milk-accent-dark: #16583a;
-                --milk-warm: #f0c86a;
+                --milk-ink: #102033;
+                --milk-muted: #5d7188;
+                --milk-line: #c8d8ea;
+                --milk-panel: #f5f9fd;
+                --milk-accent: #1769aa;
+                --milk-accent-dark: #0a315c;
+                --milk-accent-light: #d8ecff;
             }
 
             .stApp {
                 background:
-                    linear-gradient(135deg, rgba(31, 122, 77, 0.10), transparent 34%),
-                    linear-gradient(225deg, rgba(240, 200, 106, 0.18), transparent 32%),
-                    #fbfdf9;
+                    linear-gradient(135deg, rgba(10, 49, 92, 0.12), transparent 36%),
+                    linear-gradient(225deg, rgba(23, 105, 170, 0.16), transparent 34%),
+                    linear-gradient(180deg, #f7fbff 0%, #eef6ff 100%);
                 color: var(--milk-ink);
             }
 
@@ -491,7 +520,7 @@ def apply_styles():
             }
 
             [data-testid="stSidebar"] {
-                background: #eff5ef;
+                background: #edf6ff;
                 border-right: 1px solid var(--milk-line);
             }
 
@@ -502,30 +531,30 @@ def apply_styles():
             .milk-header {
                 display: flex;
                 align-items: center;
-                gap: 1rem;
-                padding: 1.25rem 1.35rem;
+                gap: 1.2rem;
+                padding: 1.35rem 1.45rem;
                 margin-bottom: 1.25rem;
                 border: 1px solid var(--milk-line);
                 border-radius: 8px;
-                background: rgba(255, 255, 255, 0.82);
-                box-shadow: 0 18px 45px rgba(23, 33, 27, 0.08);
+                background: rgba(255, 255, 255, 0.9);
+                box-shadow: 0 18px 48px rgba(10, 49, 92, 0.12);
             }
 
             .milk-logo {
-                width: 58px;
-                height: 58px;
+                width: 82px;
+                height: 82px;
                 border-radius: 8px;
                 object-fit: contain;
                 background: white;
                 border: 1px solid var(--milk-line);
-                box-shadow: 0 8px 22px rgba(23, 33, 27, 0.08);
+                box-shadow: 0 10px 28px rgba(10, 49, 92, 0.14);
             }
 
             .milk-logo-fallback {
                 display: grid;
                 place-items: center;
-                width: 58px;
-                height: 58px;
+                width: 82px;
+                height: 82px;
                 border-radius: 8px;
                 background: var(--milk-accent);
                 color: white;
@@ -534,7 +563,7 @@ def apply_styles():
 
             .milk-title {
                 margin: 0;
-                font-size: 2.15rem;
+                font-size: 2.35rem;
                 line-height: 1;
                 font-weight: 800;
                 letter-spacing: 0;
@@ -551,13 +580,13 @@ def apply_styles():
                 margin: 1rem 0;
                 border: 1px solid var(--milk-line);
                 border-radius: 8px;
-                background: rgba(255, 255, 255, 0.86);
+                background: rgba(255, 255, 255, 0.9);
             }
 
             .route-card.completed {
                 opacity: 0.56;
                 filter: grayscale(0.65);
-                background: rgba(241, 244, 241, 0.78);
+                background: rgba(232, 240, 248, 0.78);
             }
 
             .route-stops.completed {
@@ -617,23 +646,6 @@ def render_header():
     )
 
 
-def render_add_farmer_form():
-    with st.sidebar.expander("Add farmer"):
-        with st.form("add_farmer"):
-            new_name = st.text_input("Farmer name")
-            new_lat = st.number_input("Latitude", value=53.3498, format="%.6f")
-            new_lng = st.number_input("Longitude", value=-6.2603, format="%.6f")
-            submitted = st.form_submit_button("Add farmer")
-
-        if submitted:
-            if not new_name.strip():
-                st.error("Farmer name is required.")
-            else:
-                add_farmer(new_name.strip(), new_lat, new_lng)
-                st.success(f"Added {new_name.strip()}.")
-                st.rerun()
-
-
 def render_saved_route(route, show_driver=False, allow_completion=False, allow_delete=False):
     is_completed = bool(route["completed"])
     render_route_card(
@@ -684,6 +696,42 @@ def render_saved_route(route, show_driver=False, allow_completion=False, allow_d
             delete_route(route["id"])
             st.success(f"Deleted {route['route_title']}.")
             st.rerun()
+
+
+def render_manage_farmers_page():
+    farmers = load_farmers()
+
+    st.write("Current farmers")
+    table_rows = [
+        {
+            "Name": farmer["farmer_name"],
+            "Phone": farmer.get("phone") or "",
+            "Latitude": float(farmer["lat"]),
+            "Longitude": float(farmer["lng"]),
+        }
+        for farmer in farmers
+    ]
+    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+
+    st.subheader("Add farmer")
+    with st.form("manage_add_farmer"):
+        new_name = st.text_input("Farmer name")
+        new_phone = st.text_input("Phone number", placeholder="+353 87 000 0000")
+        new_lat = st.number_input("Latitude", value=53.3498, format="%.6f")
+        new_lng = st.number_input("Longitude", value=-6.2603, format="%.6f")
+        submitted = st.form_submit_button("Add farmer")
+
+    if submitted:
+        if not new_name.strip():
+            st.error("Farmer name is required.")
+            return
+        if not new_phone.strip():
+            st.error("Phone number is required.")
+            return
+
+        add_farmer(new_name.strip(), new_phone.strip(), new_lat, new_lng)
+        st.success(f"Added {new_name.strip()}.")
+        st.rerun()
 
 
 def render_assign_routes_page():
@@ -779,14 +827,16 @@ def render_manager_page():
     st.subheader("Manager")
     manager_page = st.segmented_control(
         "Manager options",
-        options=["Assign routes", "Assigned routes"],
+        options=["Assign routes", "Assigned routes", "Manage Farmers"],
         default="Assign routes",
     )
 
     if manager_page == "Assign routes":
         render_assign_routes_page()
-    else:
+    elif manager_page == "Assigned routes":
         render_assigned_routes_page()
+    else:
+        render_manage_farmers_page()
 
 
 def render_driver_page():
@@ -826,9 +876,6 @@ render_header()
 with st.sidebar:
     st.header("MilkRun")
     st.caption("Build and assign daily milk collection routes.")
-
-    if page == "Manager":
-        render_add_farmer_form()
 
 if page == "Manager":
     render_manager_page()
