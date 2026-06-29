@@ -24,6 +24,7 @@ create table if not exists assigned_routes (
   google_maps_url text not null,
   distance_km double precision not null,
   duration text not null,
+  stop_statuses_json text,
   completed boolean not null default false,
   created_at timestamp with time zone not null default now()
 );
