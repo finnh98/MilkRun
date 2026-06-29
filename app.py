@@ -117,7 +117,7 @@ def load_farmers():
         response = (
             get_supabase_client()
             .table("farmers")
-            .select("farmer_name, phone, lat, lng")
+            .select("id, farmer_name, phone, lat, lng")
             .order("farmer_name")
             .execute()
         )
@@ -139,6 +139,27 @@ def add_farmer(name, phone, lat, lng):
         ).execute()
     except Exception as e:
         supabase_error("Could not add farmer to Supabase", e)
+
+
+def update_farmer(farmer_id, name, phone, lat, lng):
+    try:
+        get_supabase_client().table("farmers").update(
+            {
+                "farmer_name": name,
+                "phone": phone,
+                "lat": float(lat),
+                "lng": float(lng),
+            }
+        ).eq("id", farmer_id).execute()
+    except Exception as e:
+        supabase_error("Could not update farmer in Supabase", e)
+
+
+def delete_farmer(farmer_id):
+    try:
+        get_supabase_client().table("farmers").delete().eq("id", farmer_id).execute()
+    except Exception as e:
+        supabase_error("Could not delete farmer from Supabase", e)
 
 
 def load_drivers():
@@ -275,6 +296,38 @@ def google_maps_route_url(origin, stops, destination):
         params["waypoints"] = "|".join(maps_location(stop) for stop in stops)
 
     return "https://www.google.com/maps/dir/?" + urlencode(params)
+
+
+def geocode_eircode(eircode, api_key):
+    params = {
+        "address": f"{eircode}, Ireland",
+        "region": "ie",
+        "key": api_key,
+    }
+
+    try:
+        response = requests.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params=params,
+            timeout=20,
+        )
+    except requests.RequestException as e:
+        halt(f"Google Geocoding request failed: {e}")
+
+    try:
+        data = response.json()
+    except ValueError:
+        st.error(f"Google returned a non-JSON response. Status code: {response.status_code}")
+        st.text(response.text)
+        st.stop()
+        raise RuntimeError("Google returned a non-JSON response.")
+
+    if data.get("status") != "OK" or not data.get("results"):
+        error_message = data.get("error_message") or data.get("status") or "No result found."
+        halt(f"Could not geocode Eircode: {error_message}")
+
+    location = data["results"][0]["geometry"]["location"]
+    return float(location["lat"]), float(location["lng"])
 
 
 def create_optimized_route(api_key, selected_stops):
@@ -574,10 +627,12 @@ def render_saved_route(route, show_driver=False, allow_completion=False, allow_d
 
 def render_manage_farmers_page():
     farmers = load_farmers()
+    farmer_lookup = {farmer["farmer_name"]: farmer for farmer in farmers}
 
     st.write("Current farmers")
     table_rows = [
         {
+            "ID": farmer["id"],
             "Name": farmer["farmer_name"],
             "Phone": farmer.get("phone") or "",
             "Latitude": float(farmer["lat"]),
@@ -587,25 +642,128 @@ def render_manage_farmers_page():
     ]
     st.dataframe(table_rows, use_container_width=True, hide_index=True)
 
-    st.subheader("Add farmer")
-    with st.form("manage_add_farmer"):
-        new_name = st.text_input("Farmer name")
-        new_phone = st.text_input("Phone number", placeholder="+353 87 000 0000")
-        new_lat = st.number_input("Latitude", value=53.3498, format="%.6f")
-        new_lng = st.number_input("Longitude", value=-6.2603, format="%.6f")
-        submitted = st.form_submit_button("Add farmer")
+    with st.expander("Add farmer", expanded=False):
+        location_method = st.radio(
+            "Location",
+            options=["Enter latitude/longitude", "Lookup by Eircode"],
+            horizontal=True,
+            key="add_location_method",
+        )
 
-    if submitted:
-        if not new_name.strip():
-            st.error("Farmer name is required.")
-            return
-        if not new_phone.strip():
-            st.error("Phone number is required.")
-            return
+        with st.form("manage_add_farmer"):
+            new_name = st.text_input("Farmer name")
+            new_phone = st.text_input("Phone number", placeholder="+353 87 000 0000")
 
-        add_farmer(new_name.strip(), new_phone.strip(), new_lat, new_lng)
-        st.success(f"Added {new_name.strip()}.")
-        st.rerun()
+            if location_method == "Lookup by Eircode":
+                new_eircode = st.text_input("Eircode", placeholder="V94 XXXX")
+                new_lat = None
+                new_lng = None
+            else:
+                new_eircode = ""
+                new_lat = st.text_input("Latitude", placeholder="52.655568")
+                new_lng = st.text_input("Longitude", placeholder="-8.451249")
+
+            submitted = st.form_submit_button("Add farmer")
+
+        if submitted:
+            if not new_name.strip():
+                st.error("Farmer name is required.")
+                return
+            if not new_phone.strip():
+                st.error("Phone number is required.")
+                return
+
+            if location_method == "Lookup by Eircode":
+                if not new_eircode.strip():
+                    st.error("Eircode is required.")
+                    return
+                new_lat, new_lng = geocode_eircode(new_eircode.strip(), load_api_key())
+            else:
+                try:
+                    new_lat = float(new_lat)
+                    new_lng = float(new_lng)
+                except ValueError:
+                    st.error("Latitude and longitude must be valid numbers.")
+                    return
+
+            add_farmer(new_name.strip(), new_phone.strip(), new_lat, new_lng)
+            st.success(f"Added {new_name.strip()}.")
+            st.rerun()
+
+    if not farmers:
+        return
+
+    with st.expander("Edit or delete farmer", expanded=False):
+        selected_farmer_name = st.selectbox(
+            "Choose farmer",
+            options=list(farmer_lookup.keys()),
+        )
+        selected_farmer = farmer_lookup[selected_farmer_name]
+
+        edit_location_method = st.radio(
+            "Location",
+            options=["Enter latitude/longitude", "Lookup by Eircode"],
+            horizontal=True,
+            key=f"edit_location_method_{selected_farmer['id']}",
+        )
+
+        with st.form("edit_farmer"):
+            edit_name = st.text_input("Farmer name", value=selected_farmer["farmer_name"])
+            edit_phone = st.text_input("Phone number", value=selected_farmer.get("phone") or "")
+
+            if edit_location_method == "Lookup by Eircode":
+                edit_eircode = st.text_input("Eircode", placeholder="V94 XXXX")
+                edit_lat = float(selected_farmer["lat"])
+                edit_lng = float(selected_farmer["lng"])
+            else:
+                edit_eircode = ""
+                edit_lat = st.number_input(
+                    "Latitude",
+                    value=float(selected_farmer["lat"]),
+                    format="%.6f",
+                    key=f"edit_lat_{selected_farmer['id']}",
+                )
+                edit_lng = st.number_input(
+                    "Longitude",
+                    value=float(selected_farmer["lng"]),
+                    format="%.6f",
+                    key=f"edit_lng_{selected_farmer['id']}",
+                )
+
+            update_submitted = st.form_submit_button("Save changes")
+
+        if update_submitted:
+            if not edit_name.strip():
+                st.error("Farmer name is required.")
+                return
+            if not edit_phone.strip():
+                st.error("Phone number is required.")
+                return
+
+            if edit_location_method == "Lookup by Eircode":
+                if not edit_eircode.strip():
+                    st.error("Eircode is required.")
+                    return
+                edit_lat, edit_lng = geocode_eircode(edit_eircode.strip(), load_api_key())
+
+            update_farmer(
+                selected_farmer["id"],
+                edit_name.strip(),
+                edit_phone.strip(),
+                edit_lat,
+                edit_lng,
+            )
+            st.success(f"Updated {edit_name.strip()}.")
+            st.rerun()
+
+        confirm_delete = st.checkbox(
+            f"Confirm delete {selected_farmer_name}",
+            key=f"confirm_delete_farmer_{selected_farmer['id']}",
+        )
+        if st.button("Delete farmer", disabled=not confirm_delete, type="secondary"):
+            delete_farmer(selected_farmer["id"])
+            st.success(f"Deleted {selected_farmer_name}.")
+            st.rerun()
 
 
 def render_assign_routes_page():
